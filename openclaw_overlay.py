@@ -31,7 +31,7 @@ POLL_INTERVAL = 2.0
 SESSION_POLL_INTERVAL = 5.0  # faster for session JSONL
 PID_POLL_INTERVAL = 20.0
 
-WIN_W, WIN_H = 380, 310
+WIN_W, WIN_H = 360, 260
 MARGIN = 12
 
 # Runtime log regex
@@ -376,8 +376,8 @@ class SessionAnalyzer:
         elif self._last_user_msg:
             state.current_task = self._last_user_msg
 
-        # Recent tools (last 5)
-        state.recent_tools = list(self._tool_history)[-5:]
+        # Recent tools (last 3)
+        state.recent_tools = list(self._tool_history)[-3:]
 
         # Cost
         state.total_cost = self._total_cost
@@ -725,123 +725,119 @@ class OverlayView(AppKit.NSView):
         s = self._state
         y = 10
 
-        # ── Header: Status dot + label + tool + timer ──
+        # ── Row 1: [dot] STATUS  $cost  goal text ──
         dot_color = {
             "active": COLOR_GREEN, "thinking": COLOR_YELLOW,
             "idle": COLOR_GRAY, "error": COLOR_RED, "offline": COLOR_DIM,
         }.get(s.status, COLOR_DIM)
 
-        dot_x, dot_y, dot_r = 14, y + 5, 4
+        dot_x, dot_y, dot_r = 14, y + 5, 5
         Quartz.CGContextSetRGBFillColor(ctx, *dot_color)
         Quartz.CGContextFillEllipseInRect(
             ctx, Quartz.CGRectMake(dot_x - dot_r, dot_y - dot_r, dot_r * 2, dot_r * 2)
         )
 
-        _dt(self, ctx, s.status.upper(), 24, y, 10, bold=True, color=dot_color)
+        label = s.status.upper()
+        _dt(self, ctx, label, 24, y, 10, bold=True, color=dot_color)
+        # Position after status label
+        x_after = 24 + len(label) * 7 + 4
+
         if s.current_tool:
-            _dt(self, ctx, s.current_tool, 85, y, 10, color=COLOR_WHITE)
-        if s.activity_start:
-            elapsed = time.time() - s.activity_start
-            m, sec = divmod(int(elapsed), 60)
-            _dt(self, ctx, f"{m}:{sec:02d}", w - 38, y, 10, color=COLOR_MUTED)
-        y += 16
+            _dt(self, ctx, s.current_tool, x_after, y, 10, color=COLOR_WHITE)
+            if s.activity_start:
+                elapsed = time.time() - s.activity_start
+                mn, sec = divmod(int(elapsed), 60)
+                _dt(self, ctx, f"{mn}:{sec:02d}", w - 40, y, 10, color=COLOR_MUTED)
+        else:
+            # Cost + goal on the status line
+            cost_str = f"${s.total_cost:.2f}"
+            _dt(self, ctx, cost_str, x_after, y, 10, color=COLOR_MUTED)
+            goal_x = x_after + len(cost_str) * 7 + 6
+            if s.current_task:
+                task = s.current_task
+                max_chars = int((w - goal_x - 6) / 6)
+                if max_chars > 3:
+                    if len(task) > max_chars:
+                        task = task[:max_chars - 3] + "..."
+                    _dt(self, ctx, task, goal_x, y, 10, color=COLOR_CYAN)
+        y += 18
 
-        # ── Current task ──
-        if s.current_task:
-            task = s.current_task
-            if len(task) > 52:
-                task = task[:49] + "..."
-            _dt(self, ctx, task, 14, y, 9, color=COLOR_CYAN)
-        y += 14
-
-        _ds(ctx, y, w)
-        y += 6
-
-        # ── Metrics row: Cost | Context | Errors ──
-        cost_str = f"${s.total_cost:.3f}"
+        # ── Row 2: ctx | err | comp | tools — all on one line ──
         ctx_k = s.context_tokens // 1000 if s.context_tokens else 0
-        err_rate = ""
+        parts = [f"{ctx_k}k"]
         total = s.tool_errors + s.tool_successes
         if total > 0:
             pct = int(s.tool_errors / total * 100)
-            err_rate = f"err:{pct}%"
-        metrics = f"Cost: {cost_str}  Ctx: {ctx_k}k  {err_rate}"
-        _dt(self, ctx, metrics, 14, y, 9, color=COLOR_MUTED)
-        y += 14
-
-        # Burn rate
-        if s.cost_last_5min > 0:
-            rate_str = f"${s.cost_last_5min:.3f}/5m"
-            _dt(self, ctx, f"Burn: {rate_str}", 14, y, 9, color=COLOR_ORANGE)
-            y += 12
+            parts.append(f"e:{pct}%")
         if s.compactions > 0:
-            _dt(self, ctx, f"Compactions: {s.compactions}", 14 + 160, y - 12 if s.cost_last_5min > 0 else y, 9, color=COLOR_MUTED)
-            if s.cost_last_5min <= 0:
-                y += 12
+            parts.append(f"c:{s.compactions}")
+        # Add top tools inline
+        if s.tool_counts:
+            sorted_tools = sorted(s.tool_counts.items(), key=lambda x: -x[1])[:4]
+            for tname, cnt in sorted_tools:
+                parts.append(f"{tname}:{cnt}")
+        _dt(self, ctx, "  ".join(parts), 14, y, 9, color=COLOR_MUTED)
+        y += 16
 
         _ds(ctx, y, w)
         y += 6
 
-        # ── Recent tool calls (the activity feed) ──
-        _dt(self, ctx, "RECENT ACTIVITY", 14, y, 8, bold=True, color=COLOR_MUTED)
-        y += 12
+        # ── Recent activity (3 items) ──
+        _dt(self, ctx, "ACTIVITY", 14, y, 9, bold=True, color=COLOR_MUTED)
+        y += 14
 
         if s.recent_tools:
-            for tool in s.recent_tools[-5:]:
+            for tool in s.recent_tools[-3:]:
                 name = tool["name"]
                 args = tool.get("args", "")
                 dur = tool.get("duration", 0)
                 ok = tool.get("ok", True)
 
-                # Status indicator
                 indicator_color = COLOR_GREEN if ok else COLOR_RED
-                indicator = "+" if ok else "x"
-                _dt(self, ctx, indicator, 14, y, 9, bold=True, color=indicator_color)
+                _dt(self, ctx, "+" if ok else "x", 14, y, 9, bold=True, color=indicator_color)
+                _dt(self, ctx, name, 26, y, 9, bold=True, color=COLOR_WHITE)
 
-                # Tool name
-                _dt(self, ctx, name, 24, y, 9, bold=True, color=COLOR_WHITE)
-
-                # Args summary
                 if args:
-                    if len(args) > 28:
-                        args = args[:25] + "..."
-                    _dt(self, ctx, args, 90, y, 8, color=COLOR_MUTED)
+                    if len(args) > 26:
+                        args = args[:23] + "..."
+                    _dt(self, ctx, args, 95, y, 9, color=COLOR_MUTED)
 
-                # Duration
                 if dur > 0:
                     dur_str = f"{dur:.1f}s" if dur < 60 else f"{dur/60:.1f}m"
-                    _dt(self, ctx, dur_str, w - 40, y, 8, color=COLOR_MUTED)
+                    _dt(self, ctx, dur_str, w - 40, y, 9, color=COLOR_MUTED)
 
-                y += 13
+                y += 14
         else:
-            _dt(self, ctx, "  (waiting for activity)", 14, y, 9, color=COLOR_DIM)
-            y += 13
+            _dt(self, ctx, "(waiting for activity)", 14, y, 9, color=COLOR_DIM)
+            y += 14
 
-        # ── Tool distribution (top 3) ──
-        if s.tool_counts:
-            _ds(ctx, y + 2, w)
-            y += 8
-            _dt(self, ctx, "TOOLS", 14, y, 8, bold=True, color=COLOR_MUTED)
-            y += 12
-            sorted_tools = sorted(s.tool_counts.items(), key=lambda x: -x[1])[:4]
-            parts = []
-            for tname, cnt in sorted_tools:
-                parts.append(f"{tname}:{cnt}")
-            _dt(self, ctx, "  ".join(parts), 14, y, 8, color=COLOR_PURPLE)
-            y += 13
-
-        # ── Warnings ──
+        # ── Warnings (max 3) ──
         if s.warnings:
             _ds(ctx, y + 2, w)
             y += 8
             for warn in s.warnings[:3]:
-                # Warning background
                 Quartz.CGContextSetRGBFillColor(ctx, *COLOR_ERROR_BG)
-                Quartz.CGContextFillRect(ctx, Quartz.CGRectMake(6, y - 2, w - 12, 14))
-                if len(warn) > 48:
-                    warn = warn[:45] + "..."
-                _dt(self, ctx, f"! {warn}", 10, y, 8, color=COLOR_ORANGE)
-                y += 15
+                Quartz.CGContextFillRect(ctx, Quartz.CGRectMake(6, y - 3, w - 12, 16))
+                if len(warn) > 45:
+                    warn = warn[:42] + "..."
+                _dt(self, ctx, f"! {warn}", 10, y, 9, color=COLOR_ORANGE)
+                y += 18
+
+        # ── Resize window to fit content ──
+        needed_h = y + 8
+        if abs(h - needed_h) > 4:
+            panel = self.window()
+            if panel:
+                frame = panel.frame()
+                delta = needed_h - h
+                new_frame = Foundation.NSMakeRect(
+                    frame.origin.x,
+                    frame.origin.y - delta,
+                    frame.size.width,
+                    needed_h,
+                )
+                panel.setFrame_display_(new_frame, True)
+                self.setFrameSize_(Foundation.NSMakeSize(w, needed_h))
 
 
 # ─── OverlayWindow ───────────────────────────────────────────────────────────
